@@ -1,39 +1,12 @@
-use anyhow::Context as _;
-use poise::serenity_prelude::{ClientBuilder, GatewayIntents};
+use anyhow::{anyhow, Context as _};
+use poise::serenity_prelude::{
+    Channel, ClientBuilder, Context, FullEvent, GatewayIntents, ReactionType,
+};
 use shuttle_runtime::SecretStore;
 use shuttle_serenity::ShuttleSerenity;
 
-const AVAILABLE_ROLES: &[&str] = &["baaaaaaaa", "boooo"];
-
 struct Data {} // User data, which is stored and accessible in all command invocations
 type Error = Box<dyn std::error::Error + Send + Sync>;
-type Context<'a> = poise::Context<'a, Data, Error>;
-
-#[poise::command(slash_command)]
-async fn hello(ctx: Context<'_>) -> Result<(), Error> {
-    if let Some(roles) = ctx.guild().map(|g| g.roles.clone()) {
-        if let Some(member) = ctx.author_member().await {
-            for (role_id, role) in roles.iter() {
-                if AVAILABLE_ROLES.contains(&role.name.as_str()) {
-                    if member.roles.contains(role_id) {
-                        member.remove_role(ctx, role_id).await?;
-                        ctx.say(format!("you already had role {}", role.name))
-                            .await?;
-                    } else {
-                        member.add_role(ctx, role_id).await?;
-                        ctx.say(format!("role {} added", role.name)).await?;
-                    }
-                }
-            }
-        } else {
-            ctx.say("world have no member").await?;
-        }
-    } else {
-        ctx.say("world have no roles").await?;
-    }
-
-    Ok(())
-}
 
 #[shuttle_runtime::main]
 async fn main(#[shuttle_runtime::Secrets] secret_store: SecretStore) -> ShuttleSerenity {
@@ -44,7 +17,9 @@ async fn main(#[shuttle_runtime::Secrets] secret_store: SecretStore) -> ShuttleS
 
     let framework = poise::Framework::builder()
         .options(poise::FrameworkOptions {
-            commands: vec![hello()],
+            event_handler: |ctx, event, framework, data| {
+                Box::pin(event_handler(ctx, event, framework, data))
+            },
             ..Default::default()
         })
         .setup(|ctx, _ready, framework| {
@@ -61,4 +36,72 @@ async fn main(#[shuttle_runtime::Secrets] secret_store: SecretStore) -> ShuttleS
         .map_err(shuttle_runtime::CustomError::new)?;
 
     Ok(client.into())
+}
+
+async fn event_handler(
+    ctx: &Context,
+    event: &FullEvent,
+    _framework: poise::FrameworkContext<'_, Data, Error>,
+    _data: &Data,
+) -> Result<(), Error> {
+    match event {
+        FullEvent::ReactionAdd {
+            add_reaction: reaction,
+        } => {
+            if !reaction.message(ctx).await?.content.contains("votre rôle") {
+                return Ok(());
+            }
+
+            println!(
+                "reaction {:?} added by {:?}",
+                reaction.clone().emoji,
+                reaction.clone().member.map(|m| m.roles),
+            );
+            if let ReactionType::Custom {
+                name: Some(custom_emoji),
+                ..
+            } = reaction.clone().emoji
+            {
+                if let Channel::Guild(g) = reaction.channel(ctx).await? {
+                    let roles = g.guild(ctx).ok_or(anyhow!("no guild"))?.roles.clone();
+                    for (role_id, role) in roles.iter() {
+                        if role.name == custom_emoji {
+                            if let Some(member) = reaction.clone().member {
+                                member.add_role(ctx, role_id).await?
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        FullEvent::ReactionRemove {
+            removed_reaction: reaction,
+        } => {
+            if !reaction.message(ctx).await?.content.contains("votre rôle") {
+                return Ok(());
+            }
+            println!("reaction {:?} removed ", reaction.clone().emoji);
+
+            if let (Some(guild_id), Some(user_id)) = (reaction.guild_id, reaction.user_id) {
+                println!("reaction {:?}", reaction);
+                if let ReactionType::Custom {
+                    name: Some(custom_emoji),
+                    ..
+                } = reaction.clone().emoji
+                {
+                    let member = ctx.http.get_member(guild_id, user_id).await?;
+                    if let Channel::Guild(g) = reaction.channel(ctx).await? {
+                        let roles = g.guild(ctx).ok_or(anyhow!("no guild"))?.roles.clone();
+                        for (role_id, role) in roles.iter() {
+                            if role.name == custom_emoji {
+                                member.remove_role(ctx, role_id).await?
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
